@@ -127,7 +127,9 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 task->timer = timer;
 
                 // TODO: initialize task deadline_jiff
-                // TODO: initialize task task_struct
+                // initialize task task_struct
+                task->linux_task = find_task_by_pid(pid);
+
                 // TODO: start task timer
 
                 // insert task into list of tasks
@@ -223,6 +225,7 @@ void __exit mp2_exit(void)
                 curr_task = tmp->mp2_task;
                 del_timer_sync(curr_task->timer);
                 kfree(curr_task->timer);
+
                 kmem_cache_free(mp2_cache, curr_task);
 
                 // deallocation of node
