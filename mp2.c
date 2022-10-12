@@ -14,24 +14,34 @@ MODULE_AUTHOR("Group_ID");
 MODULE_DESCRIPTION("CS-423 MP2");
 
 #define DEBUG 1
+// NOTES:
 // https://hammertux.github.io/slab-allocator
 // https://tldp.org/LDP/lki/lki-2.html
 
-struct mp2_task_struct {
-        struct task_struct* linux_task;
-        long period;
-        long processing_time;
-        struct timer_list wakeup_timer;
-};
-struct kmem_cache *mp2_cache;
-
 struct process_list {
         struct list_head list;
-        long pid;
+        unsigned long pid;
         struct mp2_task_struct* mp2_task;
 };
 struct process_list* registered_processes;
+
+enum task_state { RUNNING, READY, SLEEPING };
+struct mp2_task_struct {
+        struct task_struct* linux_task; // represents the PCB
+        struct timer_list* timer;
+        struct list_head list;
+        unsigned long period;
+        unsigned long processing_time;
+        unsigned long deadline_jiff; // need to know whether to put it to sleep or not?
+        enum task_state state;
+};
+
+struct kmem_cache *mp2_cache;
 spinlock_t lock;
+
+void timer_callback(struct timer_list* data) {
+
+}
 
 ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, loff_t* pos) {
         char* data = kmalloc(size, GFP_KERNEL);
@@ -47,10 +57,10 @@ ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, lof
         spin_lock_irq(&lock);
         list_for_each(curr_pos, &(registered_processes->list)) {
                 tmp = list_entry(curr_pos, struct process_list, list);
-                long pid = tmp->pid;
+                unsigned long pid = tmp->pid;
                 struct mp2_task_struct* task = tmp->mp2_task;
-                long period = task->period;
-                long processing_time = task->processing_time;
+                unsigned long period = task->period;
+                unsigned long processing_time = task->processing_time;
 
                 if (pid > *pos) {
                         int curr_bytes_read = sprintf(data + bytes_read, "%lu: %lu, %lu\n", pid, period, processing_time);
@@ -71,7 +81,7 @@ ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, lof
         kfree(data);
 
         return bytes_read;
- }
+}
 
 ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t size, loff_t* pos) {
         if (*pos != 0) {
@@ -90,52 +100,69 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
         char operation = buf_cpy[0];
         temp = temp + 2; // remove the first comma
         if (operation == 'R') { // R,<pid>,<period>,<processing time>
-                //printk("MP2 process sent R\n");
                 char* pid = strsep(&temp, ",");
                 char* period = strsep(&temp, ",");
                 char* processing_time = temp;
                 
                 // allocate new struct mp2_task_struct using cache
                 struct mp2_task_struct* task = kmem_cache_alloc(mp2_cache, GFP_KERNEL);
-                // initialize task in SLEEPING state, set state to TASK_UNINTERRUPTIBLE
-                set_current_state(TASK_UNINTERRUPTIBLE);
-                kstrtol(period, 10, &(task->period));
-                kstrtol(processing_time, 10, &(task->processing_time));
+                
+                // initialize task SLEEPING state, period, and processing time
+                task->state = SLEEPING;
+                kstrtoul(period, 10, &(task->period));
+                kstrtoul(processing_time, 10, &(task->processing_time));
 
-                // create new linked list node
+                // initialize linked list node pid and task
                 struct process_list* tmp = (struct process_list*) kmalloc(sizeof(struct process_list), GFP_KERNEL);
                 tmp->mp2_task = task;
-                kstrtol(pid, 10, &(tmp->pid));
+                kstrtoul(pid, 10, &(tmp->pid));
                 INIT_LIST_HEAD(&(tmp->list));
-                
+
+                // initialize task list head
+                task->list = tmp->list;
+
+                // initialize task timer
+                struct timer_list* timer = kmalloc(sizeof(struct timer_list), GFP_KERNEL);
+                timer_setup(timer, timer_callback, 0); // initializes the callback function and data
+                task->timer = timer;
+
+                // TODO: initialize task deadline_jiff
+                // TODO: initialize task task_struct
+                // TODO: start task timer
+
                 // insert task into list of tasks
                 spin_lock_irq(&lock);
                 list_add_tail(&(tmp->list), &(registered_processes->list));
                 spin_unlock_irq(&lock);
         }
         else if (operation == 'Y') { // Y,<pid>
-                //printk("MP2 process sent Y\n");
                 char* pid = temp;
-                //printk("MP2 pid = %s\n", pid);
         }
         else if (operation == 'D') { // D,<pid>
-                long pid = 0;
-                kstrtol(temp, 10, &(pid));
+                unsigned long pid = 0;
+                kstrtoul(temp, 10, &(pid));
 
                 // kmem_cache_free() frees the memory allocated to the mp2_task_struct previously allocated
                 // remove node from list
                 struct process_list *tmp;
                 struct list_head *curr_pos, *q;
+                struct mp2_task_struct* curr_task;
                 spin_lock_irq(&lock);
                 list_for_each_safe(curr_pos, q, &(registered_processes->list)) {
                         tmp = list_entry(curr_pos, struct process_list, list);
-                        long curr_pid = tmp->pid;
-                        struct mp2_task_struct* curr_task = tmp->mp2_task;
+                        unsigned long curr_pid = tmp->pid;
                 
                         if (curr_pid == pid) { 
+                                // deallocation of mp2_task_struct
+                                curr_task = tmp->mp2_task;
+                                del_timer_sync(curr_task->timer); // deactivate timer and ensure handler has finished
+                                kfree(curr_task->timer);
+                                kmem_cache_free(mp2_cache, curr_task);
+
+                                // deallocation of node
                                 list_del(curr_pos);
                                 kfree(tmp);
-                                kmem_cache_free(mp2_cache, curr_task);
+
                                 break;
                         }
                 }
@@ -186,9 +213,19 @@ void __exit mp2_exit(void)
 
         struct process_list *tmp;
         struct list_head *pos, *q;
+        struct mp2_task_struct* curr_task;
         list_for_each_safe(pos, q, &(registered_processes->list)) {
                 tmp = list_entry(pos, struct process_list, list);
+
                 printk("MP2 mp2_exit(): DELETING NODE");
+
+                // deallocation related to mp2_task_struct
+                curr_task = tmp->mp2_task;
+                del_timer_sync(curr_task->timer);
+                kfree(curr_task->timer);
+                kmem_cache_free(mp2_cache, curr_task);
+
+                // deallocation of node
                 list_del(pos);
                 kfree(tmp);
         }
