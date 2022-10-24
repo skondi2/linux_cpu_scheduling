@@ -22,7 +22,7 @@ MODULE_DESCRIPTION("CS-423 MP2");
 
 struct process_list {
         struct list_head list;
-        unsigned long pid;
+        int pid;
         struct mp2_task_struct* mp2_task;
 };
 struct process_list* registered_processes;
@@ -32,8 +32,8 @@ struct mp2_task_struct {
         struct task_struct* linux_task; // represents the PCB
         struct timer_list wakeup_timer;
         struct list_head list;
-        unsigned long period;
-        unsigned long processing_time;
+        int period;
+        int processing_time;
         enum task_state state;
         unsigned long deadline_jiff; // my next period
 };
@@ -42,7 +42,7 @@ struct mp2_task_struct* current_mp2_task;
 struct kmem_cache *mp2_cache;
 spinlock_t lock;
 
-struct mp2_task_struct* get_mp2_struct(unsigned long pid) {
+struct mp2_task_struct* get_mp2_struct(int pid) {
         struct process_list* tmp;
         struct list_head* curr_pos;
         struct mp2_task_struct* res = NULL;
@@ -60,11 +60,11 @@ struct mp2_task_struct* get_mp2_struct(unsigned long pid) {
 struct mp2_task_struct* get_shortest_ready_task(void) {
         struct list_head* curr_pos;
         struct mp2_task_struct* next_task = NULL;
-        unsigned long shortest_period = -1;
+        int shortest_period = -1;
 
         list_for_each(curr_pos, &(registered_processes->list)) {
                 struct process_list* tmp = list_entry(curr_pos, struct process_list, list);
-                unsigned long period = tmp->mp2_task->period;
+                int period = tmp->mp2_task->period;
                 
                 if (tmp->mp2_task->state == READY) {
                         if (shortest_period == -1 || period < shortest_period) {
@@ -75,7 +75,7 @@ struct mp2_task_struct* get_shortest_ready_task(void) {
         }
         if (current_mp2_task != NULL) {
                 if (next_task == NULL) {
-                        printk("get_shortest_ready_task(): next_task is null");
+                        printk("MP2(): get_shortest_ready_task(): next_task is null");
                 }
                 if (current_mp2_task->period <= next_task->period) {
                         return NULL;
@@ -118,9 +118,11 @@ int dispatch_callback(void* arguments) {
 
                 // if there are no READY tasks || the next shortest period is longer than current
                 if (next_task == NULL) { 
+                        printk("MP2(): dispatch callback(): next task was NULL");
                         preempt_task(current_mp2_task->linux_task);
                 }
                 else { 
+                        printk("MP2(): dispatch callback(): gonna do context switch, pid = %d\n", next_task->linux_task->pid);
                         // old task set to READY if it was RUNNING 
                         if (current_mp2_task != NULL) {
                                 current_mp2_task->state = (current_mp2_task->state == RUNNING) ? READY : current_mp2_task->state;
@@ -160,13 +162,13 @@ ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, lof
         spin_lock_irq(&lock);
         list_for_each(curr_pos, &(registered_processes->list)) {
                 tmp = list_entry(curr_pos, struct process_list, list);
-                unsigned long pid = tmp->pid;
+                int pid = tmp->pid;
                 temp_task = tmp->mp2_task;
-                unsigned long period = temp_task->period;
-                unsigned long processing_time = temp_task->processing_time;
+                int period = temp_task->period;
+                int processing_time = temp_task->processing_time;
 
                 if (pid > *pos) {
-                        int curr_bytes_read = sprintf(data + bytes_read, "%lu: %lu, %lu\n", pid, period, processing_time);
+                        int curr_bytes_read = sprintf(data + bytes_read, "%d: %d, %d\n", pid, period, processing_time);
                         if (bytes_read + curr_bytes_read >= size) {
                                 break;
                         }
@@ -190,11 +192,10 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
         if (*pos != 0) {
                 return 0; // CHECK: that this is correct?
         }
-
+        //printk("MP2(): write() size parameter = %lu\n", size);
         char* buf_cpy = kmalloc(size+1, GFP_KERNEL);
-        memset(buf_cpy, 0, size+1);
-        copy_from_user(buf_cpy, buf, size+1);
-        buf_cpy[size-1] = '\0';
+        copy_from_user(buf_cpy, buf, size);
+        buf_cpy[size] = '\0';
         
         char* temp = kmalloc(size+1, GFP_KERNEL);
         strcpy(temp, buf_cpy);
@@ -203,35 +204,37 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
         char operation = buf_cpy[0];
         temp = temp + 2; // remove the first comma
         if (operation == 'R') { // R,<pid>,<period>,<processing time>
-                char* pid = strsep(&temp, ",");
-                char* period = strsep(&temp, ",");
-                char* processing_time = temp;
+                int pid;
+                int period;
+                int processing_time;
+                kstrtoint(strsep(&temp, ","), 10, &pid);
+                kstrtoint(strsep(&temp, ","), 10, &period);
+                kstrtoint(temp, 10, &processing_time);
+                printk("MP2(): REGISTRATION %d %d %d", pid, period, processing_time);
                 
                 // allocate new struct mp2_task_struct using cache
                 struct mp2_task_struct* task = kmem_cache_alloc(mp2_cache, GFP_KERNEL);
                 
                 // initialize task SLEEPING state, period, processing time, deadline
                 task->state = SLEEPING;
-                kstrtoul(period, 10, &(task->period));
-                kstrtoul(processing_time, 10, &(task->processing_time));
+                task->period = period;
+                task->processing_time = processing_time;
                 task->deadline_jiff = 0;
+
+                // initialize task wakeup_timer
+                timer_setup(&(task->wakeup_timer), wakeup_timer_callback, 0); // initializes the callback function and data
+
+                // initialize task task_struct
+                task->linux_task = find_task_by_pid(pid);
 
                 // initialize linked list node pid and task
                 struct process_list* tmp = (struct process_list*) kmalloc(sizeof(struct process_list), GFP_KERNEL);
                 tmp->mp2_task = task;
-                kstrtoul(pid, 10, &(tmp->pid));
+                tmp->pid = pid;
                 INIT_LIST_HEAD(&(tmp->list));
 
                 // initialize task list head
-                task->list = tmp->list;
-
-                // initialize task wakeup_timer
-                struct timer_list* wakeup_timer = kmalloc(sizeof(struct timer_list), GFP_KERNEL);
-                timer_setup(wakeup_timer, wakeup_timer_callback, 0); // initializes the callback function and data
-                task->wakeup_timer = *wakeup_timer;
-
-                // initialize task task_struct
-                task->linux_task = find_task_by_pid(tmp->pid);
+                task->list = tmp->list; // TODO: might delete?
 
                 // insert task into list of tasks
                 spin_lock_irq(&lock);
@@ -239,43 +242,50 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 spin_unlock_irq(&lock);
         }
         else if (operation == 'Y') { // Y,<pid>
-                unsigned long pid;
-                kstrtoul(temp, 10, &pid);
+                printk("MP2(): YIELD temp = %s\n", temp);
+                int pid;
+                kstrtoint(temp, 10, &pid);
+                printk("MP2(): YIELD %d", pid);
 
                 // find yielding task
                 spin_lock_irq(&lock);
                 struct mp2_task_struct* yielding_task = get_mp2_struct(pid);
                 spin_unlock_irq(&lock);
-
-                if (yielding_task->deadline_jiff == 0 || jiffies >= yielding_task->deadline_jiff) {
-                        yielding_task->state = READY;
-                        if (yielding_task->deadline_jiff == 0) { // if process just registered and is ready to start
-                                yielding_task->deadline_jiff = yielding_task->period;
-                                mod_timer(&(yielding_task->wakeup_timer), 0);
-                        }
-                        else { // if next period has already started
-                                yielding_task->deadline_jiff += yielding_task->period;
-                                mod_timer(&(yielding_task->wakeup_timer), yielding_task->deadline_jiff);
-                        }
+                
+                if (yielding_task == NULL) {
+                        printk("MP2(): yield(): couldn't find yielding task");
                 }
                 else {
-                        yielding_task->state = SLEEPING;
+                        if (yielding_task->deadline_jiff == 0 || jiffies >= yielding_task->deadline_jiff) {
+                                yielding_task->state = READY;
+                                if (yielding_task->deadline_jiff == 0) { // if process just registered and is ready to start
+                                        yielding_task->deadline_jiff = yielding_task->period;
+                                        mod_timer(&(yielding_task->wakeup_timer), jiffies);
+                                }
+                                else { // if next period has already started
+                                        yielding_task->deadline_jiff += yielding_task->period;
+                                        mod_timer(&(yielding_task->wakeup_timer), jiffies + yielding_task->deadline_jiff);
+                                }
+                        }
+                        else {
+                                yielding_task->state = SLEEPING;
 
-                        // set wakeup timer
-                        unsigned long sleep_time = yielding_task->deadline_jiff - jiffies;
-                        mod_timer(&(yielding_task->wakeup_timer), jiffies + sleep_time);
-                        
-                        // wakeup dispatch thread
-                        wake_up_process(dispatch_thread);
+                                // set wakeup timer
+                                unsigned long sleep_time = yielding_task->deadline_jiff - jiffies;
+                                mod_timer(&(yielding_task->wakeup_timer), jiffies + sleep_time);
+                                
+                                // wakeup dispatch thread
+                                wake_up_process(dispatch_thread);
 
-                        // put the task to sleep in TASK_UNINTERRUPTIBLE
-                        set_current_state(TASK_UNINTERRUPTIBLE);
-                        schedule();
+                                // put the task to sleep in TASK_UNINTERRUPTIBLE
+                                set_current_state(TASK_UNINTERRUPTIBLE);
+                                schedule();
+                        }
                 }
         }
         else if (operation == 'D') { // D,<pid>
-                unsigned long pid = 0;
-                kstrtoul(temp, 10, &(pid));
+                int pid;
+                kstrtoint(temp, 10, &(pid));
 
                 // kmem_cache_free() frees the memory allocated to the mp2_task_struct previously allocated
                 // remove node from list
@@ -286,13 +296,11 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 spin_lock_irq(&lock);
                 list_for_each_safe(curr_pos, q, &(registered_processes->list)) {
                         tmp = list_entry(curr_pos, struct process_list, list);
-                        unsigned long curr_pid = tmp->pid;
+                        int curr_pid = tmp->pid;
                 
                         if (curr_pid == pid) { 
                                 // deallocation of mp2_task_struct
                                 temp_task = tmp->mp2_task;
-                                del_timer_sync(&(temp_task->wakeup_timer)); // deactivate timer and ensure handler has finished
-                                kfree(&(temp_task->wakeup_timer));
                                 kmem_cache_free(mp2_cache, temp_task);
 
                                 // deallocation of node
@@ -302,10 +310,9 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                                 break;
                         }
                 }
-                
                 spin_unlock_irq(&lock);
+                printk("MP2(): Deregistered");
         }
-
         kfree(original);
         return size;
 }
@@ -322,14 +329,14 @@ struct proc_dir_entry* proc_file;
 int __init mp2_init(void)
 {
         #ifdef DEBUG
-        printk(KERN_ALERT "MP2 MODULE LOADING\n");
+        printk(KERN_ALERT "MP2(): MODULE LOADING\n");
         #endif
         
         proc_dir = proc_mkdir("mp2", NULL);
         proc_file = proc_create("status", 0666, proc_dir, &proc_fops);
 
         // create new cache of size sizeof(mp2_task_struct)
-        mp2_cache = KMEM_CACHE(mp2_task_struct, SLAB_PANIC|SLAB_ACCOUNT);
+        mp2_cache = KMEM_CACHE(mp2_task_struct, SLAB_PANIC);
 
         registered_processes = kmalloc(sizeof(struct process_list), GFP_KERNEL);
         INIT_LIST_HEAD(&(registered_processes->list));
@@ -338,7 +345,7 @@ int __init mp2_init(void)
 
         dispatch_thread = kthread_create(&dispatch_callback, NULL, "dispatch_thread");
 
-        printk(KERN_ALERT "MP2 MODULE LOADED\n");
+        printk(KERN_ALERT "MP2(): MODULE LOADED\n");
         return 0;
 }
 
@@ -346,7 +353,7 @@ int __init mp2_init(void)
 void __exit mp2_exit(void)
 {
         #ifdef DEBUG
-        printk(KERN_ALERT "MP2 MODULE UNLOADING\n");
+        printk(KERN_ALERT "MP2(): MODULE UNLOADING\n");
         #endif
 
         struct process_list *tmp;
@@ -355,18 +362,15 @@ void __exit mp2_exit(void)
         list_for_each_safe(pos, q, &(registered_processes->list)) {
                 tmp = list_entry(pos, struct process_list, list);
 
-                printk("MP2 mp2_exit(): DELETING NODE");
-
                 // deallocation related to mp2_task_struct
                 temp_task = tmp->mp2_task;
-                del_timer_sync(&(temp_task->wakeup_timer));
-                kfree(&(temp_task->wakeup_timer));
-
                 kmem_cache_free(mp2_cache, temp_task);
 
                 // deallocation of node
                 list_del(pos);
                 kfree(tmp);
+
+                printk("MP2(): mp2_exit(): AFTER DELETING NODE");
         }
         
         kmem_cache_destroy(mp2_cache);
@@ -376,7 +380,7 @@ void __exit mp2_exit(void)
         remove_proc_entry("status", proc_dir);
         remove_proc_entry("mp2", NULL);
 
-        printk(KERN_ALERT "MP2 MODULE UNLOADED\n");
+        printk(KERN_ALERT "MP2(): MODULE UNLOADED\n");
 }
 
 // Register init and exit funtions
