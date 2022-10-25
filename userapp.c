@@ -73,9 +73,9 @@ int main(int argc, char *argv[]){
         //elapsed = (after.tv_sec - before.tv_sec) + ((after.tv_usec - before.tv_usec) / 1000000.0);
         //printf("elapsed = %f\n", elapsed);
         //sum += elapsed;
-        printf("job iteration = %d\n", num_jobs);
+        //printf("job iteration = %d\n", num_jobs);
         num_jobs--;
-        printf("decremented job iteration = %d\n", num_jobs);
+        //printf("decremented job iteration = %d\n", num_jobs);
         if (num_jobs <= 0) {
             //printf("breaking");
             break;
