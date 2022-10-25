@@ -58,6 +58,7 @@ struct mp2_task_struct* get_mp2_struct(int pid) {
 }
 
 struct mp2_task_struct* get_shortest_ready_task(void) {
+        printk("MP2(): entering get_shortest_ready_task()");
         struct list_head* curr_pos;
         struct mp2_task_struct* next_task = NULL;
         int shortest_period = -1;
@@ -77,33 +78,28 @@ struct mp2_task_struct* get_shortest_ready_task(void) {
                 if (next_task == NULL) {
                         printk("MP2(): get_shortest_ready_task(): next_task is null");
                 }
-                if (current_mp2_task->period <= next_task->period) {
-                        return NULL;
+                else {
+                        if (current_mp2_task->period <= next_task->period) {
+                                return current_mp2_task;
+                        }
                 }
         }
+        if (next_task != NULL) {
+               printk("MP2(): get_shortest_ready_task(): found next_task"); 
+        }
         return next_task;
-}
-
-void preempt_task(struct task_struct* task) {
-        struct sched_attr attr;
-        attr.sched_policy = SCHED_NORMAL;
-        attr.sched_priority = 0;
-        sched_setattr_nocheck(task, &attr);
-}
-
-void prioritize_task(struct task_struct* task) {
-        struct sched_attr attr;
-        wake_up_process(task);
-        attr.sched_policy = SCHED_FIFO;
-        attr.sched_priority = 99;
-        sched_setattr_nocheck(task, &attr);
 }
 
 void wakeup_timer_callback(struct timer_list* timer_list_) {
         // find calling task and set it as READY
         spin_lock_irq(&lock);
         struct mp2_task_struct* expired_task = container_of(timer_list_, struct mp2_task_struct, wakeup_timer);
-        expired_task->state = READY;
+        if (expired_task == NULL) {
+                printk("MP2(): timer callback: expired task was NULL");
+        } else {
+                printk("MP2(): timer callback: Setting expired task to READY");
+                expired_task->state = READY;
+        }
         spin_unlock_irq(&lock);
 
         // wakeup dispatch thread
@@ -119,7 +115,17 @@ int dispatch_callback(void* arguments) {
                 // if there are no READY tasks || the next shortest period is longer than current
                 if (next_task == NULL) { 
                         printk("MP2(): dispatch callback(): next task was NULL");
-                        preempt_task(current_mp2_task->linux_task);
+                        if (current_mp2_task != NULL) {
+                                // preempt old task
+                                sched_set_normal(current_mp2_task->linux_task, -20);
+                        }
+                        else {
+                                printk("MP2(): dispatch callback(): wait, current task is NULL too");
+                                //spin_unlock_irq(&lock);
+                                //set_current_state(TASK_INTERRUPTIBLE);
+                                //schedule();
+                                //break;
+                        }
                 }
                 else { 
                         printk("MP2(): dispatch callback(): gonna do context switch, pid = %d\n", next_task->linux_task->pid);
@@ -129,15 +135,23 @@ int dispatch_callback(void* arguments) {
                         }
                         next_task->state = RUNNING;
 
-                        // sched_attr for new task
-                        prioritize_task(next_task->linux_task);
-
-                        // sched_attr for old task
-                        preempt_task(current_mp2_task->linux_task);
+                        // prioritize new task
+                        sched_set_fifo(next_task->linux_task);
+                        wake_up_process(next_task->linux_task);
+                        
+                        // preempt old task
+                        if (current_mp2_task != NULL) {
+                                //PRIO_TO_NICE(current_mp2_task->linux_task->static_prio)
+                                sched_set_normal(current_mp2_task->linux_task, -20);
+                        }
+                        else {
+                                printk("MP2(): dispatch callback(): current task was NULL");
+                        }
 
                         // reset what current_mp2_task points to
                         current_mp2_task = next_task;
                         current_mp2_task->deadline_jiff = jiffies + msecs_to_jiffies(current_mp2_task->period);
+                        printk("MP2(): dispatch callback(): finished doing context switch");
                 }
                 spin_unlock_irq(&lock);
 
@@ -145,7 +159,7 @@ int dispatch_callback(void* arguments) {
                 set_current_state(TASK_INTERRUPTIBLE);
                 schedule();
         }
-        do_exit(0);
+
         return 0;
 }
 
@@ -210,7 +224,6 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 kstrtoint(strsep(&temp, ","), 10, &pid);
                 kstrtoint(strsep(&temp, ","), 10, &period);
                 kstrtoint(temp, 10, &processing_time);
-                printk("MP2(): REGISTRATION %d %d %d", pid, period, processing_time);
                 
                 // allocate new struct mp2_task_struct using cache
                 struct mp2_task_struct* task = kmem_cache_alloc(mp2_cache, GFP_KERNEL);
@@ -226,6 +239,9 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
                 // initialize task task_struct
                 task->linux_task = find_task_by_pid(pid);
+                if (task->linux_task == NULL) {
+                        printk("MP2(): registration, linux_task is NULL");
+                }
 
                 // initialize linked list node pid and task
                 struct process_list* tmp = (struct process_list*) kmalloc(sizeof(struct process_list), GFP_KERNEL);
@@ -242,10 +258,8 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 spin_unlock_irq(&lock);
         }
         else if (operation == 'Y') { // Y,<pid>
-                printk("MP2(): YIELD temp = %s\n", temp);
                 int pid;
                 kstrtoint(temp, 10, &pid);
-                printk("MP2(): YIELD %d", pid);
 
                 // find yielding task
                 spin_lock_irq(&lock);
@@ -259,10 +273,12 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                         if (yielding_task->deadline_jiff == 0 || jiffies >= yielding_task->deadline_jiff) {
                                 yielding_task->state = READY;
                                 if (yielding_task->deadline_jiff == 0) { // if process just registered and is ready to start
+                                        printk("MP2(): yield(): first time running");
                                         yielding_task->deadline_jiff = yielding_task->period;
                                         mod_timer(&(yielding_task->wakeup_timer), jiffies);
                                 }
                                 else { // if next period has already started
+                                        printk("MP2(): yield(): next period already started");
                                         yielding_task->deadline_jiff += yielding_task->period;
                                         mod_timer(&(yielding_task->wakeup_timer), jiffies + yielding_task->deadline_jiff);
                                 }
@@ -272,8 +288,13 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
                                 // set wakeup timer
                                 unsigned long sleep_time = yielding_task->deadline_jiff - jiffies;
+                                printk("MP2(): yield(): sleep time = %lu\n", sleep_time);
                                 mod_timer(&(yielding_task->wakeup_timer), jiffies + sleep_time);
                                 
+                                spin_lock_irq(&lock);
+                                current_mp2_task = NULL;
+                                spin_unlock_irq(&lock);
+
                                 // wakeup dispatch thread
                                 wake_up_process(dispatch_thread);
 
@@ -285,7 +306,7 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
         }
         else if (operation == 'D') { // D,<pid>
                 int pid;
-                kstrtoint(temp, 10, &(pid));
+                kstrtoint(temp, 10, &pid);
 
                 // kmem_cache_free() frees the memory allocated to the mp2_task_struct previously allocated
                 // remove node from list
@@ -312,6 +333,19 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
                 }
                 spin_unlock_irq(&lock);
                 printk("MP2(): Deregistered");
+
+                if (current_mp2_task == NULL) {
+                        printk("MP2(): deregistration, current task is NULL");
+                }
+                else {
+                        if (current_mp2_task->linux_task->pid == pid) {
+                                spin_lock_irq(&lock);
+                                current_mp2_task = NULL;
+                                spin_unlock_irq(&lock);
+
+                                wake_up_process(dispatch_thread);
+                        }
+                }
         }
         kfree(original);
         return size;

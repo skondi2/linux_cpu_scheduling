@@ -53,7 +53,7 @@ int main(int argc, char *argv[]){
 
     //double sum = 0.0;
 
-    while (num_jobs > 0) {
+    while (1) {
         //gettimeofday(&before, NULL);
 
         fibonacci(n);
@@ -64,17 +64,25 @@ int main(int argc, char *argv[]){
         //elapsed = (after.tv_sec - before.tv_sec) + ((after.tv_usec - before.tv_usec) / 1000000.0);
         //printf("elapsed = %f\n", elapsed);
         //sum += elapsed;
-        printf("finished job iteration = %d\n", num_jobs);
+        printf("job iteration = %d\n", num_jobs);
         num_jobs--;
+        printf("decremented job iteration = %d\n", num_jobs);
+        if (num_jobs <= 0) {
+            //printf("breaking");
+            break;
+        }
         fflush(write_ptr1);
         fprintf(write_ptr1, "Y,%d", pid);
     }
-
+    //printf("exiting while loop");
     // D,<pid>
+    fflush(write_ptr1);
     fprintf(write_ptr1, "D,%d", pid);
-
+    //printf("finished writing deregister");
+    
     fclose(write_ptr1);
-    printf("Finished\n");
+    //printf("Finished");
+
     //printf("%f\n", sum / 10);
     
     return 0;
