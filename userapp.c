@@ -12,10 +12,20 @@ int fibonacci(int n) {
 }
 
 int main(int argc, char *argv[]){
+    if (argc <= 2) {
+        printf("Not enough arguments\n");
+        return 1;
+    }
+    
     FILE* write_ptr = fopen("/proc/mp2/status", "w");
+    if (!write_ptr) {
+        printf("Failed to open mp2 status file\n");
+        return 1;
+    }
     
     int pid = getpid();
     int period = atoi(argv[1]);
+    int num_jobs = atoi(argv[2]);
     int processing_time = 16099; // milliseconds for n = 45
 
     // R,<pid>,<period>,<processing time>
@@ -37,7 +47,7 @@ int main(int argc, char *argv[]){
         }
     }
     if (registered == 0) {
-        printf("PID not in list");
+        printf("PID not in list\n");
         return 1;
     }
     fclose(read_ptr);
@@ -46,7 +56,6 @@ int main(int argc, char *argv[]){
     FILE* write_ptr1 = fopen("/proc/mp2/status", "w");
     fprintf(write_ptr1, "Y,%d", pid);
 
-    int num_jobs = 2;
     int n = 45;
     struct timeval after;
     struct timeval before;
